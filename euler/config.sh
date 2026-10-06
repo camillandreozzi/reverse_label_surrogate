@@ -18,8 +18,9 @@ VARIANTS="mf sf"                      # both fitted in every task with the same 
 TARGETS=("Kzz" "Rp" "Tint" "C/O" "[N/H]" "[O/H]" "[S/H]" "logg" "f")
 N_HF=97
 
-# Slurm resources (adjust after timing one full-size fit)
-CPUS=1                                # 1 thread per task, parallelism from many tasks (as in Model 3)
-MEM_PER_CPU=2G                        # observed peak ~0.6 GB per task
-TIME_FULL=24:00:00                    # tuning ~1.5-2 h + sf/mf fits on all rows, single thread
-TIME_LOO=12:00:00                     # one (fold, output) pair: tuning ~1.5-2 h + 2 fits
+# Slurm resources (adjust after timing one full-size fit); each can be overridden per submission,
+# e.g. CPUS=4 TIME_LOO=24:00:00 bash euler/submit_loo.sh 370
+CPUS=${CPUS:-1}                                # 1 thread per task, parallelism from many tasks (as in Model 3)
+MEM_PER_CPU=${MEM_PER_CPU:-2G}                        # observed peak ~0.6 GB per task
+TIME_FULL=${TIME_FULL:-24:00:00}                    # tuning ~1.5-2 h + sf/mf fits on all rows, single thread
+TIME_LOO=${TIME_LOO:-12:00:00}                     # one (fold, output) pair: tuning ~1.5-2 h + 2 fits

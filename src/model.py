@@ -25,6 +25,14 @@ import pandas as pd
 from src.cv import fold_rows, hf_kfold_splits
 from src.preprocessing import InputScaler, TargetScaler
 
+# GPBoost's covariance-parameter order per variant, with the readable names used in results
+COV_PAR_ORDER = {"mf": ["nugget", "sigma2_L", "range_L", "sigma2_delta", "range_delta", "rho"],
+                 "sf": ["nugget", "sigma2", "range"]}
+# Starting values used when some parameters are held fixed (GPBoost then needs a full initial vector);
+# variances on the standardised-target scale, ranges in standardised-spectrum distance units.
+COV_PAR_INIT = {"nugget": 0.5, "sigma2_L": 0.5, "range_L": 10.0, "sigma2_delta": 0.1, "range_delta": 3.0,
+                "rho": 1.0, "sigma2": 0.5, "range": 10.0}
+
 COV_PAR_NAMES = {"Error_var": "nugget", "low_GP_var": "sigma2_L", "low_GP_range": "range_L",
                  "discrepancy_GP_var": "sigma2_delta", "discrepancy_GP_range": "range_delta",
                  "rho": "rho", "GP_var": "sigma2", "GP_range": "range"}
@@ -45,6 +53,8 @@ class ModelConfig:
     tune_n_lf: int = 1000  # LF rows subsampled for tuning (None = all)
     tune_n_trials: int = 10  # TPE trials
     tune_k: int = 3  # inner folds over the HF rows
+    gp_optim_params: dict = None  # passed to GPModel.set_optim_params (None = GPBoost defaults, lbfgs)
+    fixed_cov_pars: dict = None  # covariance parameters held fixed by name, e.g. {"range_L": 15}; see COV_PAR_ORDER
     boost_params: dict = field(default_factory=lambda: {
         "learning_rate": 0.05, "max_depth": 3, "min_data_in_leaf": 20,
         "feature_fraction": 0.5, "lambda_l2": 1.0, "verbose": -1})
@@ -60,12 +70,24 @@ class IndependentGPBoost:
     def _gp_model(self, Xs, fid):
         c = self.config
         if c.variant == "mf":
-            return gpb.GPModel(gp_coords=np.column_stack([Xs, fid]), cov_function="ar1_mf_matern",
-                               cov_fct_shape=c.cov_fct_shape, gp_approx="vecchia_euclidean",
-                               num_neighbors=c.num_neighbors, likelihood="gaussian",
-                               num_parallel_threads=_n_threads())
-        return gpb.GPModel(gp_coords=Xs, cov_function="matern", cov_fct_shape=c.cov_fct_shape,
-                           likelihood="gaussian", num_parallel_threads=_n_threads())
+            gp = gpb.GPModel(gp_coords=np.column_stack([Xs, fid]), cov_function="ar1_mf_matern",
+                             cov_fct_shape=c.cov_fct_shape, gp_approx="vecchia_euclidean",
+                             num_neighbors=c.num_neighbors, likelihood="gaussian",
+                             num_parallel_threads=_n_threads())
+        else:
+            gp = gpb.GPModel(gp_coords=Xs, cov_function="matern", cov_fct_shape=c.cov_fct_shape,
+                             likelihood="gaussian", num_parallel_threads=_n_threads())
+        optim = dict(c.gp_optim_params or {})
+        if c.fixed_cov_pars:
+            order = COV_PAR_ORDER[c.variant]
+            unknown = set(c.fixed_cov_pars) - set(order)
+            if unknown:
+                raise ValueError(f"unknown covariance parameters for {c.variant}: {unknown}")
+            optim["init_cov_pars"] = np.array([c.fixed_cov_pars.get(n, COV_PAR_INIT[n]) for n in order], float)
+            optim["estimate_cov_par_index"] = np.array([int(n not in c.fixed_cov_pars) for n in order], np.int32)
+        if optim:
+            gp.set_optim_params(params=optim)
+        return gp
 
     def _params(self):
         p = dict(self.config.boost_params)
@@ -215,3 +237,43 @@ def tune_hyperparameters(X, y, is_hf, config, seed=0, search_space=None):
 def apply_tuning(config, tuning):
     """Config with the tuned tree parameters (the round count is passed to fit separately)."""
     return replace(config, boost_params=dict(tuning["best_params"]))
+
+
+# GPBoost's default covariance optimiser (lbfgs) can abort the whole process with an Eigen assertion on
+# rare data sets (seen: sf, Rp, LOO fold 41). Such a fit is retried with this optimiser instead.
+FALLBACK_GP_OPTIM = {"optimizer_cov": "gradient_descent"}
+
+
+def _fit_child(conn, config, X, y, is_hf, num_boost_round, X_pred, save_dir):
+    model = IndependentGPBoost(config).fit(X, y, is_hf, num_boost_round)
+    if save_dir is not None:
+        model.save(save_dir)
+    mean, var = model.predict(X_pred)
+    conn.send((mean, var, model.cov_pars().to_dict()))
+    conn.close()
+
+
+def fit_predict_safe(config, X, y, is_hf, num_boost_round, X_pred, save_dir=None):
+    """Fit + predict in a child process; if GPBoost aborts, retry once with FALLBACK_GP_OPTIM.
+
+    Returns (mean, var, cov_pars dict, gp_optimizer used). The model is saved to `save_dir` if given.
+    """
+    import multiprocessing as mp
+    # "spawn", not "fork": forking after GPBoost/LightGBM have started their OpenMP threads (e.g. during
+    # tuning) deadlocks the child in GNU OpenMP. A spawned child is a fresh interpreter (callers need the
+    # usual `if __name__ == "__main__":` guard).
+    ctx = mp.get_context("spawn")
+    for cfg, label in [(config, "default"), (replace(config, gp_optim_params=FALLBACK_GP_OPTIM), "gradient_descent")]:
+        recv, send = ctx.Pipe(duplex=False)
+        proc = ctx.Process(target=_fit_child, args=(send, cfg, X, y, is_hf, num_boost_round, X_pred, save_dir))
+        proc.start()
+        send.close()
+        try:
+            result = recv.recv()  # blocks until the child sends or dies (EOFError)
+        except EOFError:
+            result = None
+        proc.join()
+        if result is not None and proc.exitcode == 0:
+            return (*result, label)
+        print(f"fit with {label} GP optimiser failed (exit code {proc.exitcode}); retrying", flush=True)
+    raise RuntimeError("fit failed with both the default and the fallback GP optimiser")

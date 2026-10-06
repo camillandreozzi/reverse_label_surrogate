@@ -26,7 +26,7 @@ import pandas as pd
 
 from _cli import add_model_args, config_for, out_dir, shared_tuning
 from src.data_load import TARGETS, load_mf, target_slug
-from src.model import IndependentGPBoost
+from src.model import fit_predict_safe
 
 
 def fit_target(target, X, y, is_hf, a):
@@ -35,16 +35,15 @@ def fit_target(target, X, y, is_hf, a):
     n_rounds = tuning["num_boost_round"]
     for variant in a.variants:
         t0 = time.time()
-        model = IndependentGPBoost(config_for(variant, a, tuning)).fit(X, y, is_hf, n_rounds)
-        model.save(out_dir(variant, "models", slug))
-        cp = model.cov_pars()
-        cp.to_frame(target).T.rename_axis("target").to_csv(out_dir(variant, "cov_pars") / f"{slug}.csv")
         hf = is_hf == 1
-        mean, var = model.predict(X[hf])
+        mean, var, cov_pars, gp_opt = fit_predict_safe(config_for(variant, a, tuning), X, y, is_hf, n_rounds,
+                                                        X[hf], out_dir(variant, "models", slug))
+        cp = pd.Series({**cov_pars, "gp_optimizer": gp_opt})
+        cp.to_frame(target).T.rename_axis("target").to_csv(out_dir(variant, "cov_pars") / f"{slug}.csv")
         pd.DataFrame({"sample": range(hf.sum()), "y": y[hf], "mean": mean, "var": var}).to_csv(
             out_dir(variant, "insample") / f"{slug}.csv", index=False)
         print(f"{target} [{variant}]: rounds={n_rounds} fit {time.time() - t0:.0f}s  "
-              + "  ".join(f"{k}={v:.3g}" for k, v in cp.items()), flush=True)
+              + "  ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in cp.items()), flush=True)
 
 
 def merge(variants):

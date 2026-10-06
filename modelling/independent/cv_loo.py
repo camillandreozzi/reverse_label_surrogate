@@ -34,7 +34,7 @@ from _cli import add_model_args, config_for, out_dir, run_tuning
 from src.cv import fold_rows, hf_loo_splits
 from src.data_load import TARGETS, load_mf, target_slug
 from src.metrics import summarise
-from src.model import IndependentGPBoost
+from src.model import fit_predict_safe
 
 N_HF = 97
 
@@ -58,8 +58,9 @@ def run_pair(i, target, train_hf, test_hf, X, Y, is_hf, a):
     preds, params = [], []
     for variant in a.variants:
         t0 = time.time()
-        model = IndependentGPBoost(config_for(variant, a, tuning)).fit(X[tr], y[tr], is_hf[tr], n_rounds)
-        mean, var = model.predict(X[te])
+        save_dir = fold_dir / f"fold_{i:02d}_models" / variant / target_slug(target) if a.save_models else None
+        mean, var, cov_pars, gp_opt = fit_predict_safe(config_for(variant, a, tuning), X[tr], y[tr], is_hf[tr],
+                                                        n_rounds, X[te], save_dir)
         secs = time.time() - t0
         preds.append({"fold": i, "sample": int(test_hf[0]), "target": target, "variant": variant,
                       "y": y[te][0], "mean": mean[0], "var": var[0], "fit_seconds": secs})
@@ -67,9 +68,7 @@ def run_pair(i, target, train_hf, test_hf, X, Y, is_hf, a):
                        **{f"tree_{k}": v for k, v in tuning["best_params"].items()},
                        "inner_best_iterations": " ".join(map(str, tuning["fold_best_iterations"])),
                        "inner_cv_mse": tuning["best_score"], "tune_seconds": tuning["seconds"],
-                       **model.cov_pars().to_dict()})
-        if a.save_models:
-            model.save(fold_dir / f"fold_{i:02d}_models" / variant / target_slug(target))
+                       "gp_optimizer": gp_opt, **cov_pars})
         print(f"fold {i} {target} [{variant}]: y={y[te][0]:.3g} mean={mean[0]:.3g} "
               f"sd={np.sqrt(var[0]):.3g} ({secs:.0f}s)", flush=True)
     pd.DataFrame(params).to_csv(par_file, index=False)
