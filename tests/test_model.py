@@ -14,10 +14,15 @@ def data():
     return X[keep], y["f"].to_numpy()[keep], is_hf[keep]
 
 
+@pytest.mark.parametrize("gp_pca", [None, 5])
 @pytest.mark.parametrize("variant", ["mf", "sf"])
-def test_fit_predict_save_load(tmp_path, data, variant):
+def test_fit_predict_save_load(tmp_path, data, variant, gp_pca):
     X, y, is_hf = data
-    m = IndependentGPBoost(ModelConfig(variant=variant, num_neighbors=10)).fit(X, y, is_hf, 5)
+    m = IndependentGPBoost(ModelConfig(variant=variant, num_neighbors=10, gp_pca_components=gp_pca)).fit(
+        X, y, is_hf, 5)
+    # trees always see all 195 bins (+ the fidelity flag for mf); the GP sees the PCs when gp_pca is set
+    assert m.booster.num_feature() == 195 + (variant == "mf")
+    assert (m.pca is None) == (gp_pca is None)
     mean, var = m.predict(X[:3])
     assert mean.shape == var.shape == (3,) and np.all(var > 0)
     cp = m.cov_pars()

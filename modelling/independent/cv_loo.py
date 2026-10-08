@@ -12,7 +12,7 @@ Each (fold, output) pair writes its own files, so Euler runs one array task per 
 and an interrupted run can be resubmitted: finished pairs are skipped unless `--overwrite`.
 `--merge` combines everything and computes the metrics.
 
-    results/independent/cv_loo/
+    results/<run>/cv_loo/   (<run> = independent, or pca with --gp-pca K)
         folds/fold_<i>_<target>_predictions.csv   variant, y, mean, var, fit_seconds
         folds/fold_<i>_<target>_params.csv        variant, tuned tree params + rounds, covariance parameters
         folds/fold_<i>_<target>_trials.csv        every TPE trial (params, inner-CV MSE, rounds)
@@ -30,7 +30,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from _cli import add_model_args, config_for, out_dir, run_tuning
+from _cli import add_model_args, config_for, out_dir, set_run, run_tuning
 from src.cv import fold_rows, hf_loo_splits
 from src.data_load import TARGETS, load_mf, target_slug
 from src.metrics import summarise
@@ -113,7 +113,7 @@ def main():
     p.add_argument("--merge", action="store_true", help="only combine fold files and compute metrics")
     p.add_argument("--overwrite", action="store_true", help="refit pairs that are already done")
     p.add_argument("--save-models", action="store_true", help="also save every fold's boosters (large)")
-    a = p.parse_args()
+    a = set_run(p.parse_args())
     if a.merge:
         merge()
         return

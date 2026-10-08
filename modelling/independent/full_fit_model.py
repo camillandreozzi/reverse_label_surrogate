@@ -7,7 +7,7 @@ fitted with the tuned parameters and round count:
   sf  tree mean + Matern GP on HF97 only
 Every target writes its own files so Euler array tasks can run targets in parallel:
 
-    results/independent/
+    results/<run>/   (<run> = independent, or pca with --gp-pca K)
         tuning/<target>.json, _trials.csv    shared tuned parameters + rounds (tuned with mf), TPE trials
         <variant>/models/<target>/           booster.json (trees + GP) and meta.pkl (scalers, config)
         <variant>/cov_pars/<target>.csv      covariance parameters (standardised-target scale; rho for mf)
@@ -24,7 +24,7 @@ import time
 
 import pandas as pd
 
-from _cli import add_model_args, config_for, out_dir, shared_tuning
+from _cli import add_model_args, config_for, out_dir, set_run, shared_tuning
 from src.data_load import TARGETS, load_mf, target_slug
 from src.model import fit_predict_safe
 
@@ -70,7 +70,7 @@ def main():
     p = add_model_args(argparse.ArgumentParser(description=__doc__,
                                                formatter_class=argparse.RawDescriptionHelpFormatter))
     p.add_argument("--merge", action="store_true", help="only combine per-target outputs")
-    a = p.parse_args()
+    a = set_run(p.parse_args())
     if a.merge:
         merge(a.variants)
         return

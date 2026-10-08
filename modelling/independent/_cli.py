@@ -1,4 +1,7 @@
-"""Shared CLI options, paths and the shared tuning step for the independent-model scripts."""
+"""Shared CLI options, paths and the shared tuning step for the independent-model scripts.
+
+Outputs go to results/<run>/: `independent` (GP on all 195 bins) or `pca` (`--gp-pca K`, GP on K PCs).
+"""
 import json
 import sys
 import time
@@ -12,6 +15,7 @@ from src.data_load import RESULTS, TARGETS, target_slug  # noqa: E402
 from src.model import ModelConfig, apply_tuning, tune_hyperparameters  # noqa: E402
 
 VARIANTS = ["mf", "sf"]
+RUN = "independent"  # results/<RUN>/, set from the CLI by set_run
 
 
 def add_model_args(p):
@@ -24,19 +28,32 @@ def add_model_args(p):
     p.add_argument("--tune-n-lf", type=int, default=1000, help="LF rows subsampled for tuning")
     p.add_argument("--tune-trials", type=int, default=10, help="TPE trials")
     p.add_argument("--retune", action="store_true", help="ignore a cached tuning result")
+    p.add_argument("--gp-pca", type=int, default=None,
+                   help="GP on the first K PCA scores of the spectra (trees keep all 195 bins)")
+    p.add_argument("--run", default=None, help="results/<run>/ (default: pca with --gp-pca, else independent)")
     return p
+
+
+def set_run(a):
+    """Select the results directory results/<run>/ for this process."""
+    global RUN
+    RUN = a.run or ("pca" if a.gp_pca else "independent")
+    return a
 
 
 def config_for(variant, a, tuning=None):
     c = ModelConfig(variant=variant, cov_fct_shape=a.shape, num_neighbors=a.num_neighbors,
-                    tune_n_lf=a.tune_n_lf, tune_n_trials=a.tune_trials)
+                    tune_n_lf=a.tune_n_lf, tune_n_trials=a.tune_trials, gp_pca_components=a.gp_pca)
     return apply_tuning(c, tuning) if tuning else c
 
 
 def run_settings(a):
     """Settings the shared tuning result depends on (it is always computed with the mf model)."""
-    return {"n_lf": a.n_lf, "shape": a.shape, "num_neighbors": a.num_neighbors, "seed": a.seed,
-            "tune_n_lf": a.tune_n_lf, "tune_trials": a.tune_trials}
+    s = {"n_lf": a.n_lf, "shape": a.shape, "num_neighbors": a.num_neighbors, "seed": a.seed,
+         "tune_n_lf": a.tune_n_lf, "tune_trials": a.tune_trials}
+    if a.gp_pca:  # only added when set, so cached independent tuning results still match
+        s["gp_pca"] = a.gp_pca
+    return s
 
 
 def run_tuning(X, y, is_hf, a):
@@ -49,7 +66,7 @@ def run_tuning(X, y, is_hf, a):
 
 
 def out_dir(*parts):
-    d = RESULTS / "independent"
+    d = RESULTS / RUN
     for part in parts:
         d = d / part
     d.mkdir(parents=True, exist_ok=True)
@@ -59,7 +76,7 @@ def out_dir(*parts):
 def shared_tuning(target, X, y, is_hf, a):
     """Tuning result for `target` on all HF rows (full fit), shared by sf and mf.
 
-    Cached in results/independent/tuning/<target>.json (+ _trials.csv); reused when the settings match.
+    Cached in results/<run>/tuning/<target>.json (+ _trials.csv); reused when the settings match.
     """
     d = out_dir("tuning")
     f = d / f"{target_slug(target)}.json"

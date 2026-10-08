@@ -5,6 +5,10 @@ mf: AR(1) multi-fidelity Matern GP (`ar1_mf_matern`, f_H = rho * f_L + delta) on
     GPBoost also appends it as a boosting feature (fidelity_specific_mean=True), so a single tree
     ensemble is fitted on all rows.
 sf: HF rows only, plain Matern GP, exact (97 rows).
+GP coordinates: by default the 195 standardised bins; with `gp_pca_components = k` the GP runs on the first
+k PCA scores (raw, not whitened) of the standardised spectra, PCA fitted on the training rows the variant
+uses (HF+LF for mf, HF for sf). The trees always use all 195 bins. With PCA, ranges (incl. COV_PAR_INIT) are
+in PC-score distance units.
 Mean and covariance are estimated jointly by `gpb.train(..., gp_model=...)`: the covariance parameters are
 re-estimated at every boosting iteration (train_gp_model_cov_pars=True).
 Tuning (`tune_hyperparameters`) is shared by both variants: an Optuna TPE search over the tree
@@ -23,7 +27,7 @@ import optuna
 import pandas as pd
 
 from src.cv import fold_rows, hf_kfold_splits
-from src.preprocessing import InputScaler, TargetScaler
+from src.preprocessing import GPCoordsPCA, InputScaler, TargetScaler
 
 # GPBoost's covariance-parameter order per variant, with the readable names used in results
 COV_PAR_ORDER = {"mf": ["nugget", "sigma2_L", "range_L", "sigma2_delta", "range_delta", "rho"],
@@ -55,6 +59,7 @@ class ModelConfig:
     tune_k: int = 3  # inner folds over the HF rows
     gp_optim_params: dict = None  # passed to GPModel.set_optim_params (None = GPBoost defaults, lbfgs)
     fixed_cov_pars: dict = None  # covariance parameters held fixed by name, e.g. {"range_L": 15}; see COV_PAR_ORDER
+    gp_pca_components: int = None  # GP on the first k PCA scores of the spectra (None = all 195 bins)
     boost_params: dict = field(default_factory=lambda: {
         "learning_rate": 0.05, "max_depth": 3, "min_data_in_leaf": 20,
         "feature_fraction": 0.5, "lambda_l2": 1.0, "verbose": -1})
@@ -99,6 +104,14 @@ class IndependentGPBoost:
         # Predictions are always for HF (fidelity = 1).
         return np.column_stack([Xs, np.ones(len(Xs))]) if self.config.variant == "mf" else Xs
 
+    def _fit_pca(self, Xs):
+        k = self.config.gp_pca_components
+        return GPCoordsPCA().fit(Xs, k) if k else None
+
+    @staticmethod
+    def _gp_coords(pca, Xs):
+        return pca.transform(Xs) if pca is not None else Xs
+
     def _select_rows(self, X, y, is_hf):
         if self.config.variant == "sf":
             keep = is_hf == 1
@@ -111,7 +124,8 @@ class IndependentGPBoost:
         self.x_scaler = InputScaler().fit(X, is_hf)
         self.y_scaler = TargetScaler().fit(y)
         Xs = self.x_scaler.transform(X)
-        self.gp_model = self._gp_model(Xs, is_hf)
+        self.pca = self._fit_pca(Xs)
+        self.gp_model = self._gp_model(self._gp_coords(self.pca, Xs), is_hf)
         self.booster = gpb.train(self._params(), gpb.Dataset(Xs, self.y_scaler.transform(y)),
                                  gp_model=self.gp_model, num_boost_round=int(num_boost_round),
                                  train_gp_model_cov_pars=True)
@@ -121,7 +135,8 @@ class IndependentGPBoost:
     def predict(self, X):
         """HF predictive mean and variance (including the nugget) on the original target scale."""
         Xs = self.x_scaler.transform(X)
-        p = self.booster.predict(Xs, gp_coords_pred=self._pred_coords(Xs), predict_var=True)
+        p = self.booster.predict(Xs, gp_coords_pred=self._pred_coords(self._gp_coords(self.pca, Xs)),
+                                 predict_var=True)
         return self.y_scaler.inverse_mean(p["response_mean"]), self.y_scaler.inverse_var(p["response_var"])
 
     def cov_pars(self):
@@ -142,8 +157,9 @@ class IndependentGPBoost:
             Xtr, ytr, ftr = self._select_rows(X[tr], np.asarray(y)[tr], is_hf[tr])
             xs, ys = InputScaler().fit(Xtr, ftr), TargetScaler().fit(ytr)
             Xs_tr, Xs_te = xs.transform(Xtr), xs.transform(X[te])
-            gp = self._gp_model(Xs_tr, ftr)
-            gp.set_prediction_data(gp_coords_pred=self._pred_coords(Xs_te))
+            pca = self._fit_pca(Xs_tr)
+            gp = self._gp_model(self._gp_coords(pca, Xs_tr), ftr)
+            gp.set_prediction_data(gp_coords_pred=self._pred_coords(self._gp_coords(pca, Xs_te)))
             dtr = gpb.Dataset(Xs_tr, ys.transform(ytr))
             dva = gpb.Dataset(Xs_te, ys.transform(np.asarray(y)[te]), reference=dtr)
             b = gpb.train({**self._params(), "metric": "mse"}, dtr, gp_model=gp, num_boost_round=c.max_boost_round,
@@ -164,7 +180,7 @@ class IndependentGPBoost:
         self.booster.save_model(str(d / "booster.json"))
         with open(d / "meta.pkl", "wb") as f:
             pickle.dump({"config": asdict(self.config), "x_scaler": self.x_scaler,
-                         "y_scaler": self.y_scaler, "num_boost_round": self.num_boost_round}, f)
+                         "y_scaler": self.y_scaler, "pca": self.pca, "num_boost_round": self.num_boost_round}, f)
 
     @classmethod
     def load(cls, directory):
@@ -173,6 +189,7 @@ class IndependentGPBoost:
             meta = pickle.load(f)
         m = cls(ModelConfig(**meta["config"]))
         m.x_scaler, m.y_scaler, m.num_boost_round = meta["x_scaler"], meta["y_scaler"], meta["num_boost_round"]
+        m.pca = meta.get("pca")
         m.booster = gpb.Booster(model_file=str(d / "booster.json"))
         m.gp_model = m.booster.gp_model if hasattr(m.booster, "gp_model") else None
         return m

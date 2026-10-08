@@ -1,5 +1,6 @@
 """Input scaling with HF statistics and target standardisation."""
 import numpy as np
+from sklearn.decomposition import PCA
 
 
 class InputScaler:
@@ -32,3 +33,14 @@ class TargetScaler:
 
     def inverse_var(self, v):
         return np.asarray(v) * self.std_ ** 2
+
+
+class GPCoordsPCA:
+    """PCA of the standardised spectra, used as GP coordinates (raw scores, no whitening)."""
+
+    def fit(self, Xs, k):
+        self.pca_ = PCA(n_components=int(k)).fit(Xs)
+        return self
+
+    def transform(self, Xs):
+        return self.pca_.transform(Xs)

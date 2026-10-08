@@ -6,7 +6,9 @@
 #           bash euler/setup_env.sh                    once: venv + ar1_mf check
 #           bash euler/submit_full_fit.sh [8]          all outputs, sf + mf (or e.g. only index 8 = f, to time one fit)
 #           bash euler/submit_loo.sh                   nested LOO: 97 folds x 9 outputs = 873 tasks, independent of the full fit
-#   local:  bash euler/pull.sh                         results/independent/ -> local repo
+#   local:  bash euler/pull.sh                         results/$RUN/ -> local repo
+# RUN selects the model and results/<RUN>/ (default independent); prefix every command with it, e.g.
+#   RUN=pca bash euler/submit_loo.sh   (GP on the first 20 PCA scores, trees on all 195 bins)
 # Scratch is purged after ~2 weeks, so pull results back once jobs finish.
 
 EULER_HOST=euler                      # ~/.ssh/config alias (euler.ethz.ch, user candreozzi)
@@ -17,6 +19,14 @@ MODULES="stack/2024-06 python/3.11.6"
 VARIANTS="mf sf"                      # both fitted in every task with the same mf-tuned round count
 TARGETS=("Kzz" "Rp" "Tint" "C/O" "[N/H]" "[O/H]" "[S/H]" "logg" "f")
 N_HF=97
+
+RUN=${RUN:-independent}               # independent | pca; exported to the jobs by sbatch
+case "$RUN" in
+    independent) MODEL_ARGS="" ;;
+    pca)         MODEL_ARGS="--gp-pca 20" ;;
+    *)           echo "unknown RUN=$RUN" >&2; exit 1 ;;
+esac
+MODEL_ARGS="$MODEL_ARGS --run $RUN"
 
 # Slurm resources (adjust after timing one full-size fit); each can be overridden per submission,
 # e.g. CPUS=4 TIME_LOO=24:00:00 bash euler/submit_loo.sh 370

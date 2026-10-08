@@ -5,13 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source euler/config.sh
 array="${1:-0-$(( ${#TARGETS[@]} - 1 ))}"
-logs="results/independent/logs"
+logs="results/$RUN/logs"
 mkdir -p "$logs"
 
-jid=$(sbatch --parsable --job-name="full_fit" --array="$array" \
+jid=$(sbatch --parsable --export=ALL,RUN="$RUN" --job-name="full_fit" --array="$array" \
     --cpus-per-task="$CPUS" --mem-per-cpu="$MEM_PER_CPU" --time="$TIME_FULL" \
     --output="$logs/full_fit_%A_%a.out" euler/job_full_fit.sh)
-mid=$(sbatch --parsable --job-name="ff_merge" --dependency="afterany:$jid" \
+mid=$(sbatch --parsable --export=ALL,RUN="$RUN" --job-name="ff_merge" --dependency="afterany:$jid" \
     --cpus-per-task=1 --mem-per-cpu=2G --time=00:15:00 \
     --output="$logs/full_fit_merge_%j.out" euler/job_merge.sh full_fit_model)
 echo "$jid" > "$logs/full_fit.jobid"
